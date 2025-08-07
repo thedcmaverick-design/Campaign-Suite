@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""
+Campaign Finance Dashboard (Live-Enabled, Streamlit + FEC)
+- Reads a config of races with committee_ids and pulls live totals from FEC
+Setup:
+  pip install -r requirements.txt
+  export FEC_API_KEY=your_key
+Run:
+  streamlit run dashboard.py
+"""
+import os, requests, pandas as pd, plotly.express as px, streamlit as st
+
+FEC_API_KEY = os.getenv("FEC_API_KEY","")
+FEC_BASE = "https://api.open.fec.gov/v1"
+CONFIG_CSV = "races_config.csv"
+
+st.set_page_config(page_title="Campaign Finance Dashboard", layout="wide")
+st.title("Campaign Finance Dashboard")
+st.caption("Live-enabled with FEC totals. Provide committee IDs in races_config.csv")
+
+@st.cache_data
+def load_config():
+    if not os.path.exists(CONFIG_CSV):
+        demo = pd.DataFrame({
+            "race":["IL-14","TX-07","VA-10","NY-SEN","AZ-SEN"],
+            "candidate":["Lauren Underwood","Lizzie Fletcher","Jennifer Wexton","Kirsten Gillibrand","Ruben Gallego"],
+            "party":["D","D","D","D","D"],
+            "office":["H","H","H","S","S"],
+            "state":["IL","TX","VA","NY","AZ"],
+            "district":["14","07","10","",""],
+            "committee_id":["C123","C234","C345","C456","C567"]
+        })
+        demo.to_csv(CONFIG_CSV, index=False)
+    return pd.read_csv(CONFIG_CSV)
+
+def fec_committee_totals(committee_id, cycle=2024):
+    if not FEC_API_KEY:
+        # demo
+        return {"receipts": 1_000_000, "disbursements": 600_000, "cash_on_hand_end_period": 400_000}
+    url = f"{FEC_BASE}/committee/{committee_id}/totals/"
+    params = {"api_key": FEC_API_KEY, "cycle": cycle}
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    res = r.json().get("results", [])
+    if not res:
+        return {"receipts": 0, "disbursements": 0, "cash_on_hand_end_period": 0}
+    latest = sorted(res, key=lambda x: x.get("cycle", 0), reverse=True)[0]
+    return {
+        "receipts": latest.get("receipts", 0),
+        "disbursements": latest.get("disbursements", 0),
+        "cash_on_hand_end_period": latest.get("cash_on_hand_end_period", 0)
+    }
+
+@st.cache_data
+def build_live_table(cycle, cfg):
+    rows = []
+    for _, row in cfg.iterrows():
+        totals = fec_committee_totals(row["committee_id"], cycle=cycle)
+        rows.append({
+            "race": row["race"],
+            "candidate": row["candidate"],
+            "party": row["party"],
+            "receipts": totals["receipts"],
+            "disbursements": totals["disbursements"],
+            "cash_on_hand": totals["cash_on_hand_end_period"]
+        })
+    return pd.DataFrame(rows)
+
+cfg = load_config()
+
+colA, colB, colC = st.columns([2,1,1])
+with colB:
+    cycle = st.selectbox("Cycle", [2024, 2026], index=0)
+with colC:
+    refresh = st.button("Refresh live totals")
+
+table = build_live_table(cycle, cfg) if not refresh else build_live_table.clear() or build_live_table(cycle, cfg)
+
+col1, col2 = st.columns([2,1])
+with col1:
+    fig = px.bar(table.sort_values("receipts", ascending=False),
+                 x="race", y="receipts", color="party",
+                 hover_data=["candidate","cash_on_hand","disbursements"],
+                 title=f"Money Raised by Race (Cycle {cycle})")
+    st.plotly_chart(fig, use_container_width=True)
+with col2:
+    st.metric("Total Receipts", f"${table['receipts'].sum():,.0f}")
+    st.metric("Total Cash on Hand", f"${table['cash_on_hand'].sum():,.0f}")
+    st.metric("Total Disbursements", f"${table['disbursements'].sum():,.0f}")
+
+st.write("### Detail")
+st.dataframe(table, use_container_width=True)
+
+st.write("---")
+st.write("**How to add races:** Edit `races_config.csv` and enter real FEC `committee_id`s for each candidate.")
+
