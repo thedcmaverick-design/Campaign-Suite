@@ -1,0 +1,65 @@
+a#!/usr/bin/env python3
+"""
+Legislation Tracker (Live-Enabled via ProPublica)
+- Pulls introduced bills for a congress and filters by keywords
+- Exports CSV; ready for scheduling
+Setup:
+  export PROPUBLICA_API_KEY=your_key
+Docs:
+  https://projects.propublica.org/api-docs/congress-api/
+"""
+import os, requests, pandas as pd, time
+
+API_KEY = os.getenv("PROPUBLICA_API_KEY", "")
+BASE = "https://api.propublica.org/congress/v1"
+
+def pp_get(path, params=None):
+    if not API_KEY:
+        # Demo fallback
+        return {"results":[{"bills":[
+            {"bill_id":"hr999","title":"Health Equity Improvement Act","short_title":"Health Equity Improvement Act","sponsor_name":"Rep. Doe","introduced_date":"2024-03-12","latest_major_action":"Referred to Committee","congressdotgov_url":"https://congress.gov/"},
+            {"bill_id":"s1234","title":"Education Opportunity & Readiness Act","short_title":"Education Opportunity & Readiness Act","sponsor_name":"Sen. Roe","introduced_date":"2024-04-01","latest_major_action":"Read twice and referred","congressdotgov_url":"https://congress.gov/"}
+        ]}]}
+    headers = {"X-API-Key": API_KEY}
+    r = requests.get(f"{BASE}/{path}", headers=headers, params=params or {}, timeout=30)
+    if r.status_code == 429:
+        time.sleep(1.2)
+        r = requests.get(f"{BASE}/{path}", headers=headers, params=params or {}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def fetch_introduced(congress=118):
+    js = pp_get(f"{congress}/bills/introduced.json")
+    return js.get("results", [])[0].get("bills", [])
+
+def filter_bills(bills, query="health OR education OR housing"):
+    terms = [t.strip().lower() for t in query.split("OR")]
+    rows = []
+    for b in bills:
+        text = f"{b.get('title','')} {b.get('short_title','')}".lower()
+        if any(t in text for t in terms):
+            rows.append({
+                "bill_id": b.get("bill_id"),
+                "title": b.get("title"),
+                "sponsor": b.get("sponsor_name"),
+                "introduced": b.get("introduced_date"),
+                "latest_action": b.get("latest_major_action"),
+                "url": b.get("congressdotgov_url")
+            })
+    return pd.DataFrame(rows)
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--congress", type=int, default=118)
+    ap.add_argument("--query", default="health OR education OR housing")
+    ap.add_argument("--out", default="bills_snapshot.csv")
+    args = ap.parse_args()
+
+    bills = fetch_introduced(args.congress)
+    df = filter_bills(bills, args.query)
+    df.to_csv(args.out, index=False)
+    print(f"Saved {len(df)} bills -> {args.out}")
+
+if __name__ == "__main__":
+    main()
