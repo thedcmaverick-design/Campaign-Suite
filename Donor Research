@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+Donor Research Tool (Live-Enabled)
+- Queries FEC Individual Contributions (Schedule A) with pagination
+- Filters by employer/name/state/occupation/min_amount/date range
+- Exports clean CSV
+Setup:
+  export FEC_API_KEY=your_key
+Docs:
+  https://api.open.fec.gov/developers/
+"""
+import os, sys, time, csv, math
+from datetime import datetime
+from urllib.parse import urlencode
+import requests
+import pandas as pd
+
+API_KEY = os.getenv("FEC_API_KEY", "")
+BASE = "https://api.open.fec.gov/v1/schedules/schedule_a/"
+DEFAULT_PERIOD = 2024
+
+def fetch_page(params, page):
+    q = params.copy()
+    q["page"] = page
+    q["api_key"] = API_KEY
+    r = requests.get(BASE, params=q, timeout=30)
+    if r.status_code == 429:
+        time.sleep(1.2)
+        r = requests.get(BASE, params=q, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def search_contributions(
+    period=DEFAULT_PERIOD,
+    name=None,
+    employer=None,
+    occupation=None,
+    state=None,
+    min_amount=0,
+    date_from=None,
+    date_to=None,
+    max_pages=10,
+    per_page=100
+) -> pd.DataFrame:
+    if not API_KEY:
+        # Demo fallback
+        data = [
+            {"contributor_name":"Jordan Lee","contributor_employer":"Acme Health","contributor_occupation":"VP","contributor_city":"Arlington","contributor_state":"VA","contributor_zip":"22201","contribution_receipt_amount":2800,"contribution_receipt_date":"2024-05-21","committee_name":"Friends of Doe","committee_id":"C123"},
+            {"contributor_name":"Taylor Kim","contributor_employer":"Acme Health","contributor_occupation":"Engineer","contributor_city":"Washington","contributor_state":"DC","contributor_zip":"20001","contribution_receipt_amount":500,"contribution_receipt_date":"2024-04-11","committee_name":"Doe for Congress","committee_id":"C456"},
+            {"contributor_name":"Sam Patel","contributor_employer":"Civic Labs","contributor_occupation":"Founder","contributor_city":"Bethesda","contributor_state":"MD","contributor_zip":"20814","contribution_receipt_amount":3300,"contribution_receipt_date":"2024-03-02","committee_name":"Committee to Elect Roe","committee_id":"C789"}
+        ]
+        return pd.DataFrame(data)
+    params = {
+        "per_page": per_page,
+        "sort_hide_null": False,
+        "sort": "-contribution_receipt_amount",
+        "two_year_transaction_period": period,
+        "is_individual": True
+    }
+    if name: params["contributor_name"] = name
+    if employer: params["contributor_employer"] = employer
+    if occupation: params["contributor_occupation"] = occupation
+    if state: params["contributor_state"] = state
+    if date_from: params["min_date"] = date_from
+    if date_to: params["max_date"] = date_to
+
+    rows = []
+    for page in range(1, max_pages+1):
+        js = fetch_page(params, page)
+        for it in js.get("results", []):
+            amt = it.get("contribution_receipt_amount") or 0
+            if amt >= (min_amount or 0):
+                rows.append({
+                    "contributor_name": it.get("contributor_name"),
+                    "employer": it.get("contributor_employer"),
+                    "occupation": it.get("contributor_occupation"),
+                    "city": it.get("contributor_city"),
+                    "state": it.get("contributor_state"),
+                    "zip": it.get("contributor_zip"),
+                    "amount": amt,
+                    "date": it.get("contribution_receipt_date"),
+                    "committee": it.get("committee_name"),
+                    "committee_id": it.get("committee_id"),
+                })
+        if not js.get("pagination") or not js["pagination"].get("pages"):
+            break
+        if page >= js["pagination"]["pages"]:
+            break
+    return pd.DataFrame(rows)
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="FEC Donor Research")
+    ap.add_argument("--period", type=int, default=DEFAULT_PERIOD)
+    ap.add_argument("--name", default=None)
+    ap.add_argument("--employer", default=None)
+    ap.add_argument("--occupation", default=None)
+    ap.add_argument("--state", default=None)
+    ap.add_argument("--min_amount", type=int, default=0)
+    ap.add_argument("--date_from", default=None)
+    ap.add_argument("--date_to", default=None)
+    ap.add_argument("--max_pages", type=int, default=5)
+    ap.add_argument("--out", default="donor_prospects.csv")
+    args = ap.parse_args()
+
+    df = search_contributions(
+        period=args.period, name=args.name, employer=args.employer, occupation=args.occupation,
+        state=args.state, min_amount=args.min_amount, date_from=args.date_from, date_to=args.date_to,
+        max_pages=args.max_pages
+    )
+    df.to_csv(args.out, index=False)
+    print(f"Saved {len(df)} rows -> {args.out}")
+
+if __name__ == "__main__":
+    main()
